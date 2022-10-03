@@ -191,7 +191,7 @@ def service_impact_plot(gdf, save_path=None, event_name=None):
     ci_types = set(gdf.ci_type).difference({'people'})
     f, axes = plt.subplots(3, int(np.ceil(len(ci_types)/3)), 
                            subplot_kw=dict(projection=ccrs.PlateCarree()),
-                           figsize=(16,20*1.4142))
+                           figsize=(16,20))
 
     for service, ax in zip(services, axes.flatten()[:len(services)]):
         ax.set_extent(_get_extent(gdf), ccrs.PlateCarree())
@@ -230,9 +230,9 @@ def service_cumimpact_plot(gdf_services, save_path=None):
     
     border = cfeature.NaturalEarthFeature('cultural', 'admin_0_countries', '50m')
     ci_types = set(gdf.ci_type).difference({'people'})
-    f, axes = plt.subplots(3, int(np.ceil(len(ci_types)/3)), 
+    f, axes = plt.subplots(3, int(len(ci_types)/3), #np.ceil()
                            subplot_kw=dict(projection=ccrs.PlateCarree()),
-                           figsize=(16,20*1.4142))
+                           figsize=(16,20))#*1.4142
 
     for service, ax in zip(services, axes.flatten()[:len(services)]):
         ax.set_extent(_get_extent(gdf_services), ccrs.PlateCarree())
@@ -241,7 +241,7 @@ def service_cumimpact_plot(gdf_services, save_path=None):
                             c=gdf_services[service],
                             cmap=InfraColorMaps().servicecum_col_map, 
                             transform=ccrs.PlateCarree(), 
-                            vmin=-9., vmax=1., s=0.1)
+                            vmin=-9., vmax=1., s=0.5)
         ax.set_title(f'Cumulativ disr`s in access to {service[14:-7]}', 
                      weight='bold', fontsize=17)         
                 
@@ -252,7 +252,7 @@ def service_cumimpact_plot(gdf_services, save_path=None):
                          '(5x)', '(4x)' ,'(3x)', '(2x)',
                          '(1x)','Inavail.', 'Avail.'])
     
-    f.suptitle('Cumulative disruptions from all flood events', weight='bold', fontsize=24)
+    f.suptitle('Cumulative disruptions from TC events 2000-2021', weight='bold', fontsize=24)
     #f.tight_layout()
     f.subplots_adjust(bottom=0.05, top=0.95)  
                                        
@@ -310,12 +310,13 @@ def sum_impacts(gdf_list):
 
 cntry = sys.argv[1:]
 
-PATH_SAVE = '/Users/evelynm/Documents/WCR/3_PhD/1_coding_stuff/network_stuff/p2/'
+PATH_SAVE = '/Users/evelynm/Documents/WCR/3_PhD/1_coding_stuff/network_stuff/climada-networks-overview/p2/'
 iso3 = u_coords.country_to_iso(cntry)
 folder_path = PATH_SAVE + f'{iso3}/'
 file_paths = glob.glob(folder_path + 'cascade_results_*')
 save_path = folder_path+'plots/'
-node_gdf_orig = gpd.read_feather(folder_path+'cis_nw_nodes')
+
+node_gdf_orig = gpd.read_feather(folder_path+'cis_nw_nodes') 
 
 gdf_list= []
 for file_path in file_paths:
@@ -339,7 +340,7 @@ infra_func_plot(gdf_list[i], event_name=file_paths[i][-8:])
 infra_impact_plot(gdf_list[i], file_paths[i][-8:])
     
 gdf_services = sum_impacts(gdf_list)
-service_cumimpact_plot(gdf_services)
+service_cumimpact_plot(gdf_services, save_path=save_path)
 
 
 if not os.path.isdir(save_path):

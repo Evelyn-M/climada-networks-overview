@@ -34,8 +34,8 @@ from climada_petals.engine.networks.nw_calcs import Graph
 import climada_petals.engine.networks.nw_utils as nwu
 
 
-START_STR = '01-01-2000'
-END_STR = '31-12-2018'
+START_STR = '01-01-1990'
+END_STR = '31-12-2021'
 
 # =============================================================================
 # Impact Class Defs

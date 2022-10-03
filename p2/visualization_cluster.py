@@ -68,7 +68,7 @@ def infra_plot(gdf, save_path=None, ):
         ax.set_extent(_get_extent(gdf), ccrs.PlateCarree())
         ax.add_feature(border, facecolor='none', edgecolor='0.5')
         
-        if ci_type=='road':
+        if ci_type=='road': 
             gdf[gdf.ci_type==ci_type][:_get_roadmask(gdf)
                     ].plot(ax=ax, markersize=1, linewidth=0.5, 
                            transform=ccrs.PlateCarree(), color='k')
