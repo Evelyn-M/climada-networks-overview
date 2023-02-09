@@ -13,10 +13,11 @@ Parallel calculation per hazard via impact cascade to saving results.
 import os
 import sys
 import geopandas as gpd
-from copy import deepcopy
+from copy import copy
 import numpy as np
 import pandas as pd
 import pickle
+import shapely
 from multiprocessing import Pool
 import itertools
 from datetime import datetime
@@ -48,7 +49,7 @@ class ImpFuncsCIFlood():
         self.road = self.step_impf()
         self.residential_build = self.step_impf()
         self.industrial_build = self.step_impf()
-        self.power_line = self.step_impf()
+        self.power_line = self.no_impf()
         self.power_plant = self.step_impf()
         self.water_plant = self.step_impf()
         self.celltower = self.step_impf()
@@ -223,11 +224,11 @@ class ImpFuncsCIWind():
         impf_ppl.check()
         return impf_ppl
 
-    def binary_impact_from_prob(self, impact, seed=47):
+    def binary_impact_from_prob(self, probs_fail, seed=47):
         np.random.seed = seed
-        rand = np.random.random(impact.eai_exp.size)
+        rand = np.random.random(probs_fail.size)
         return np.array([1 if p_fail > rnd else 0 for p_fail, rnd in 
-                         zip(impact.eai_exp, rand)])
+                         zip(probs_fail, rand)])
 
 class ImpactThresh():
     def __init__(self):
@@ -273,7 +274,15 @@ def exposure_from_network_edges(ci_network, ci_type, imp_class, res,
 
 def calc_ci_impacts(hazard, exposures, imp_class):
     """
+    Parameters
+    ----------
     hazard: single event
+    exposures : list of point exposures (potentially disaggragated)
+    imp_class : one of 
+    
+    Returns
+    --------
+    List of impacts (potentially aggregated into original shapes!)
     """
     impfuncSet = ImpactFuncSet()
     imp_list = []
@@ -282,123 +291,114 @@ def calc_ci_impacts(hazard, exposures, imp_class):
         ci_type = exp.gdf.ci_type.iloc[0]
         impfuncSet.append(getattr(imp_class, ci_type))
         imp = Impact()
-        if ci_type in ['road', 'power_line']:
+        if ci_type == 'road':
             imp.calc(exp, impfuncSet, hazard, save_mat=True)
-            if (imp_class.tag=='TC') and (ci_type =='power_line'):
-                imp.imp_mat = imp.imp_mat/exp.gdf.value.values
-                
-                #imp.eai_exp = imp.eai_exp/exp.gdf.value.values
-                imp.eai_exp = imp_class.binary_impact_from_prob(imp)*exp.gdf.value.values
-                
-                exp.gdf['imp_dir']=imp.eai_exp
-                exp.gdf.groupby(level=0).imp_dir.sum()
-            imp = u_lp.impact_pnt_agg(imp,  exp.gdf, u_lp.AggMethod.SUM)
+            imp = u_lp.impact_pnt_agg(imp, exp.gdf, u_lp.AggMethod.SUM)
+        elif ci_type == 'power_line':
+            if imp_class.tag=='FL':
+                imp.calc(exp, impfuncSet, hazard, save_mat=True)
+            elif imp_class.tag=='TC':
+                # ugly work-around given that impact function for wind-damage to power lines
+                # is given in failure probability
+                orig_res = exp.gdf.value.values[0] #this works only if all values the same!
+                exp.gdf['value'] = 1
+                imp.calc(exp, impfuncSet, hazard, save_mat=True)
+                imp.imp_mat.data = imp_class.binary_impact_from_prob(imp.imp_mat.data)*orig_res
+                exp.gdf['value'] = orig_res
+            # aggregate back to line geometries:
+            imp = u_lp.impact_pnt_agg(imp, exp.gdf, u_lp.AggMethod.SUM)
         else:
-            imp.calc(exp, impfuncSet, hazard)
+            imp.calc(exp, impfuncSet, hazard, save_mat=True)
+
         imp_list.append(imp)
     
     return imp_list
 
 
-def impacts_to_graph(imp_list, exposures, ci_network):
+def impacts_to_network(imp_list, exposures, ci_network):
     
-    ci_net = deepcopy(ci_network)
+    ci_network_disr = copy(ci_network)
     
     for ix, exp in enumerate(exposures):
         ci_type = exp.gdf.ci_type.iloc[0]            
         func_states = list(
-            map(int, imp_list[ix].eai_exp<=getattr(ImpactThresh(), ci_type)))
+            map(int, imp_list[ix].imp_mat.toarray().flatten()<=getattr(ImpactThresh(), ci_type)))
         if ci_type in ['road', 'power_line']:
-            ci_net.edges.loc[ci_net.edges.ci_type==ci_type, 'func_internal'] = func_states
+            ci_network_disr.edges.loc[
+                ci_network_disr.edges.ci_type==ci_type, 'func_internal'] = func_states
+            ci_network_disr.edges.loc[
+                ci_network_disr.edges.ci_type==ci_type, 'imp_dir'] = imp_list[ix].imp_mat.toarray().flatten()
         else:
-            ci_net.nodes.loc[ci_net.nodes.ci_type==ci_type, 'func_internal'] = func_states
-    ci_net.edges['func_tot'] = [np.min([func_internal, func_tot]) for 
-                                func_internal, func_tot in zip(
-                                    ci_net.edges.func_internal, 
-                                    ci_net.edges.func_tot)]
-    ci_net.nodes['func_tot'] = [np.min([func_internal, func_tot]) for 
-                                func_internal, func_tot in zip(
-                                    ci_net.nodes.func_internal, 
-                                    ci_net.nodes.func_tot)]
+            ci_network_disr.nodes.loc[
+                ci_network_disr.nodes.ci_type==ci_type, 'func_internal'] = func_states
+            ci_network_disr.nodes.loc[
+                ci_network_disr.nodes.ci_type==ci_type, 'imp_dir'] = imp_list[ix].imp_mat.toarray().flatten()
 
-    return Graph(ci_net, directed=True)
+    ci_network_disr.edges['func_tot'] = [np.min([func_internal, func_tot]) for 
+                                          func_internal, func_tot in zip(
+                                              ci_network_disr.edges.func_internal, 
+                                              ci_network_disr.edges.func_tot)]
+    ci_network_disr.nodes['func_tot'] = [np.min([func_internal, func_tot]) for 
+                                         func_internal, func_tot in zip(
+                                             ci_network_disr.nodes.func_internal, 
+                                             ci_network_disr.nodes.func_tot)]
+
+    return ci_network_disr
 
 
-def number_noservice(service, df_res):
-    no_service = (1-df_res[df_res.ci_type=='people'][nwu.service_dict()[service]])
-    pop = df_res[df_res.ci_type=='people'].counts
-
-    return (no_service*pop).sum()
-
-def number_noservices(df_res, services=['power', 'healthcare', 'education', 
-                                        'telecom', 'mobility', 'water']):
-    servstats_dict = {}
-    for service in services:
-        servstats_dict[service] = number_noservice(service, df_res)
-    return servstats_dict
-
-def disaster_impact_allservices(pre_graph, df_res, services= ['power', 
-                                'healthcare', 'education', 'telecom',
-                                'mobility', 'water']):
-
-    dict_pre = nwu.number_noservices(pre_graph,services)
-    dict_post = number_noservices(df_res,services)
-    dict_delta = {}
-    for key, value in dict_post.items():
-        dict_delta[key] = value-dict_pre[key]
+def load_friction_surf(PATH_FRICTION, cntry_shape):
+    friction_surf = Hazard('FRIC').from_raster(
+    PATH_FRICTION, geometry=[cntry_shape.convex_hull.buffer(0.1)])
+    return friction_surf
     
-    return dict_delta
-
-def calc_cascade(hazard, exp_list, df_dependencies, graph_base, path_save,
-                 imp_class):    
+def calc_cascade(hazard, exp_list, df_dependencies, ci_network, path_save,
+                 imp_class, friction_surf, dur_thresh=60):
+    """
+    all in one wrapper. computes impacts, cascades, saves results and returns
+    stats as a dict.
+    """
     
-    print('Entered function')
-    # impact calculation 
     if not os.path.isfile(path_save+f'cascade_results_{hazard.event_name[0]}'):
-
+        # direct impacts
+        print(hazard.event_name[0])
         imp_list = calc_ci_impacts(hazard, exp_list, imp_class)
-        ci_network = graph_base.return_network()
-        ci_network.nodes = ci_network.nodes.drop('name', axis=1)
-        graph_disr = impacts_to_graph(imp_list, exp_list, ci_network)
-        
+        ci_network_disr = impacts_to_network(imp_list, exp_list, ci_network)
+        ci_network_disr.nodes = ci_network_disr.nodes.drop('name', axis=1)
+
         # cascade calculation
-        # hard-coded kwargs for cascade(). change in future                     
+        # hard-coded kwargs for cascade(). change in future  
+        graph_disr =  Graph(ci_network_disr, directed=True)                   
         graph_disr.cascade(df_dependencies, p_source='power_plant', p_sink='power_line', 
-                          source_var='el_generation', demand_var='el_consumption', 
-                          preselect=False)
+                  source_var='el_generation', demand_var='el_consumption',
+                  preselect=False, initial=False, friction_surf=friction_surf, 
+                  dur_thresh=dur_thresh)
         
-        # save selected results    
-        ci_net = graph_disr.return_network()
-        vars_to_keep_edges = ['ci_type', 'func_internal', 'func_tot', 'imp_dir',
-                              'geometry']
+        # save selected results as feather gdf
+        ci_network_disr = graph_disr.return_network()
+        vars_to_keep_edges = ['ci_type', 'func_internal', 'func_tot', 'imp_dir','geometry']
         vars_to_keep_nodes = vars_to_keep_edges.copy() 
-        vars_to_keep_nodes.extend([colname for colname in ci_net.nodes.columns 
-                                   if 'actual_supply_' in colname])
+        vars_to_keep_nodes.extend([colname for colname in ci_network_disr.nodes.columns  if 'actual_supply_' in colname])
         vars_to_keep_nodes.extend(['counts'])
         
-        df_res = ci_net.nodes[ci_net.nodes.ci_type=='people'][vars_to_keep_nodes]
+        df_res = ci_network_disr.nodes[ci_network_disr.nodes.ci_type=='people'][vars_to_keep_nodes]
         for ci_type in ['health', 'education', 'celltower', 'power_plant']:
-            df_res = df_res.append(ci_net.nodes[ci_net.nodes.ci_type==ci_type]
+            df_res = df_res.append(ci_network_disr.nodes[ci_network_disr.nodes.ci_type==ci_type]
                                    [vars_to_keep_nodes])
         for ci_type in ['power_line', 'road']:
-            df_res = df_res.append(ci_net.edges[ci_net.edges.ci_type==ci_type]
+            df_res = df_res.append(ci_network_disr.edges[ci_network_disr.edges.ci_type==ci_type]
                                    [vars_to_keep_edges])
         df_res.to_feather(path_save+f'cascade_results_{hazard.event_name[0]}')
-        
-        del ci_network
-        del df_res
-        del ci_net
+ 
+        # return dictionary with impact stats
+        return nwu.disaster_impact_allservices_df(
+            ci_network.nodes, ci_network_disr.nodes, 
+            services =['power', 'healthcare', 'education', 'telecom', 'mobility'])
     
-        return nwu.disaster_impact_allservices(
-            graph_base, graph_disr, services =['power', 'healthcare', 
-                                               'education', 'telecom', 
-                                               'mobility'])
-    else:
-        df_res = gpd.read_feather(path_save+f'cascade_results_{hazard.event_name[0]}')
-        return disaster_impact_allservices(
-            graph_base, df_res, services =['power', 'healthcare', 
-                                           'education', 'telecom', 
-                                           'mobility'])
+    # if event has already been calculated, just calculate impact stats
+    df_res = gpd.read_feather(path_save+f'cascade_results_{hazard.event_name[0]}')
+    return nwu.disaster_impact_allservices_df(
+        ci_network.nodes, df_res, 
+        services =['power', 'healthcare', 'education', 'telecom',  'mobility'])
  
 def get_selected_tcs_api(iso3, start=START_STR, end=END_STR):
     
@@ -444,13 +444,13 @@ if __name__ == '__main__':
     path_edges  = f'{path_root}/{iso3}/cis_nw_edges'
     path_nodes = f'{path_root}/{iso3}/cis_nw_nodes'
     path_save = f'{path_root}/{iso3}/'
-    path_deps = '/cluster/work/climate/evelynm/nw_inputs/dependencies/dependencies_default.csv'
-
+    path_deps = f'{path_root}/{iso3}/dependency_table_{iso3}.csv'
+    res = 300
+    PATH_FRICTION = '/cluster/work/climate/evelynm/nw_inputs/friction/202001_Global_Walking_Only_Friction_Surface_2019.tif'
+    
     # load necessary files
     ci_network = Network(edges=gpd.read_feather(path_edges), 
                          nodes=gpd.read_feather(path_nodes))
-    ci_network.nodes = ci_network.nodes.drop('name', axis=1)
-    graph_base = Graph(ci_network, directed=True)
     df_dependencies = pd.read_csv(path_deps)
 
     if haz_type=='FL':
@@ -466,27 +466,36 @@ if __name__ == '__main__':
     for ci_type in ['power_plant', 'celltower', 'health', 'education']:
         exp_list.append(exposure_from_network_nodes(ci_network, ci_type, impfunc_set))
         
-    with Pool() as pool:
-        exp_list.extend(pool.starmap(exposure_from_network_edges, zip(
-            itertools.repeat(ci_network, 2),
-            ['power_line', 'road'],
-            itertools.repeat(impfunc_set, 2),
-            [300, 300])))
+    for ci_type in ['power_line', 'road']:
+        exp_list.append(exposure_from_network_edges(ci_network, ci_type, impfunc_set, res))
     
     haz_list = [hazards.select(event_names=[event_name]) for event_name in hazards.event_name]
     n_events = len(haz_list)
 
+    # COUNTRY SHAPE    
+    __, cntry_shape = u_coord.get_admin1_info([cntry])
+    cntry_shape = shapely.ops.unary_union([shp for shp in cntry_shape[iso3]])
+    friction_surf = load_friction_surf(PATH_FRICTION, cntry_shape)
+    
     # Parallelize
     with Pool() as pool:
         dict_list = pool.starmap(calc_cascade, zip(
                              haz_list, 
                              itertools.repeat(exp_list, n_events), 
                              itertools.repeat(df_dependencies, n_events), 
-                             itertools.repeat(graph_base, n_events),
+                             itertools.repeat(ci_network, n_events),
                              itertools.repeat(path_save, n_events),
-                             itertools.repeat(impfunc_set, n_events)))
+                             itertools.repeat(impfunc_set, n_events),
+                             itertools.repeat(friction_surf, n_events),
+                             itertools.repeat(60, n_events)))
+    
+    # Sequentially
+    # dict_list = []
+    # for hazard in haz_list:
+    #     print(hazard.event_name)
+    #     dict_list.append(calc_cascade(hazard, exp_list, df_dependencies, ci_network, path_save,
+    #                       impfunc_set))
         
-
     service_dict = dict(zip(hazards.event_name, dict_list))
 
     with open(path_save+f'service_stats_{haz_type}_{iso3}.pkl', 'wb') as f:

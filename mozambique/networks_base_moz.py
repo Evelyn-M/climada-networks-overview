@@ -32,13 +32,13 @@ PATH_DATA_PP = PATH_DATA +'power/global_power_plant_database.csv'
 PATH_DATA_CT = PATH_DATA +'opencellid_global_1km_int.tif'
 PATH_DATA_POP = PATH_DATA + 'worldpop/'
 PATH_DEPS = PATH_DATA + 'dependencies/dependencies_default.csv'
-PATH_SAVE = '/cluster/work/climate/evelynm/nw_outputs/'
+PATH_SAVE = '/cluster/work/climate/evelynm/nw_outputs/MOZ/moz_project/'
 PATH_EL_CONS_GLOBAL = PATH_DATA +'power/final_consumption_iea_global.csv'
 PATH_ET = PATH_DATA +'power/electrification_targets.tif'
 PATH_FRICTION = PATH_DATA + 'friction/202001_Global_Walking_Only_Friction_Surface_2019.tif'
+PATH_HEALTH = '/cluster/work/climate/evelynm/nw_outputs/MOZ/moz_project/locations_preprocessed'# pre-processed from Zélie:
 
-import sys
-cntry = sys.argv[1]
+cntry = 'Mozambique'
 
 # =============================================================================
 # Load Infra Data
@@ -89,6 +89,7 @@ if gdf_pp.empty:
         gdf_pp = gdf_pp[gdf_pp.power=='generator']       
     gdf_pp['geometry'] = gdf_pp.geometry.apply(lambda geom: geom.centroid)
     gdf_pp = gdf_pp[['name', 'power', 'geometry']]
+gdf_pp = gdf_pp[gdf_pp.geometry.within(cntry_shape)]
 
 # PEOPLE
 nwu.get_worldpop_data(iso3, PATH_DATA_POP)
@@ -103,11 +104,8 @@ gdf_people, gdf_pp = nwu.PowerFunctionalData().assign_el_prod_consump(
     gdf_people, gdf_pp, iso3, PATH_EL_CONS_GLOBAL)
 
 # HEALTH FACILITIES
-# from osm
-gdf_health = CntryFileQuery.retrieve_cis('healthcare') 
-gdf_health['geometry'] = gdf_health.geometry.apply(lambda geom: geom.centroid)
-gdf_health = gdf_health[['name', 'geometry']]
-gdf_health = gdf_health[gdf_health.geometry.within(cntry_shape)]
+# from Zélie's pre-processed OSM query
+gdf_health = gpd.read_feather(PATH_HEALTH, crs={'init':'epsg:4326'})
 
 # EDUC. FACILITIES
 # from osm
@@ -130,18 +128,12 @@ if not Path(path_ct_cntry).is_file():
 gdf_cells = nwu.load_resampled_raster(path_ct_cntry, 1/5)
 
 # ROADS
-# from osm; by default, take all types of roads
-gdf_roads = CntryFileQuery.retrieve_cis('road')
-frac_unclass = gdf_roads.groupby('highway').size()['unclassified']/len(gdf_roads)
-
-if frac_unclass < 0.2:
-    # if unclassified road fraction is quite small, take only main roads
-    gdf_roads = gdf_roads[(gdf_roads.highway != 'residential') & 
-                          (gdf_roads.highway != 'unclassified')]
-
+# from osm; take only major roadds (primary, tertiary, secondary)
+gdf_roads = CntryFileQuery.retrieve_cis('main_road')
 gdf_roads = gdf_roads[gdf_roads.geometry.type=='LineString']
 gdf_roads = gdf_roads[['osm_id','highway', 'geometry']]
 gdf_roads = gdf_roads[gdf_roads.within(cntry_shape)]
+
 
 # =============================================================================
 # # Graphs
@@ -157,7 +149,7 @@ iter_count = 0
 while (len(power_graph.graph.clusters())>1) and (iter_count<8):
     iter_count+=1
     power_graph.link_clusters(dist_thresh=200000)
-    
+
 power_network = Network().from_graphs([power_graph.graph.as_directed()])
 # power_graph.graph.clusters().summary(): 
 
@@ -171,10 +163,13 @@ __, gdf_pp_nodes = NetworkPreprocess('power_plant').preprocess(
     gdf_nodes=gdf_pp)
 pplant_network = Network(nodes=gpd.GeoDataFrame(gdf_pp_nodes))
 
-# HEALTHCARE
-__, gdf_health_nodes = NetworkPreprocess('health').preprocess(
-    gdf_nodes=gdf_health)
-health_network = Network(nodes=gdf_health_nodes)
+# HEALTH FACILITIES
+# from Zélie's pre-processed OSM query
+gdf_health = pd.read_csv(PATH_HEALTH)
+gdf_health = gpd.GeoDataFrame(gdf_health, crs={'init':'epsg:4326'})
+gdf_health['geometry'] = gpd.GeoSeries.from_wkt(gdf_health.geometry)
+gdf_health = gdf_health[gdf_health.geometry.within(cntry_shape)]
+
 
 # EDUC
 __, gdf_educ_nodes = NetworkPreprocess('education').preprocess(
@@ -220,11 +215,8 @@ df_dependencies['conditions'] = df_dependencies['conditions'].astype(object)
 idx = np.where((df_dependencies.source=='power_line') & (
     df_dependencies.target=='people'))[0][0]
 df_dependencies.at[idx, 'conditions'] = cond
-df_dependencies = nwu.set_distance_threshs(df_dependencies, iso3, hrs_max=1)
-if frac_unclass >= 0.2:
-    # if all roads are taken, set a shorter dist thresh, else leave original main-road thresh
-    df_dependencies.loc[(df_dependencies.source=='road') &
-                        (df_dependencies.target=='people'), 'thresh_dist'] = 2000
+df_dependencies = nwu.set_travel_distance_threshs(df_dependencies, iso3, hrs_max=1)
+k=3
 
 cis_graph = Graph(cis_network, directed=True)
 
@@ -235,7 +227,7 @@ cis_graph.link_vertices_closest_k(
     'road', 'people',  link_name='road', 
     dist_thresh=df_dependencies.loc[(df_dependencies.source=='road') & 
                                     (df_dependencies.target=='people'),
-                                    'thresh_dist'].values[0], bidir=True, k=1)
+                                    'thresh_dist'].values[0], bidir=True, k=k)
 cis_graph.link_vertices_closest_k(
     'road', 'health',  link_name='road', dist_thresh=np.inf, bidir=True, k=1)
 cis_graph.link_vertices_closest_k(
@@ -263,10 +255,13 @@ cis_network = cis_graph.return_network()
 cis_network.initialize_funcstates()
 for __, row in df_dependencies.iterrows():
     cis_network.initialize_capacity(row.source, row.target)
+# special case for non-power grid dependent healthcare facilities (those with level 3 & 4)
+cis_network.nodes.loc[(cis_network.nodes.ci_type=='health')&(cis_network.nodes.Level>2), 'capacity_power_line_health']=0
+
 for __, row in df_dependencies[
         df_dependencies['type_I']=='enduser'].iterrows():
     cis_network.initialize_supply(row.source)
-    
+
 cis_graph = Graph(cis_network, directed=True)
 cis_graph.cascade(df_dependencies, p_source='power_plant', p_sink='power_line', 
                   source_var='el_generation', demand_var='el_consumption',
@@ -274,15 +269,15 @@ cis_graph.cascade(df_dependencies, p_source='power_plant', p_sink='power_line',
                   dur_thresh=60)
 cis_network = cis_graph.return_network()
 
-cis_network.nodes.to_feather(path_save_cntry+'cis_nw_nodes')
-cis_network.edges.to_feather(path_save_cntry+'cis_nw_edges')
+cis_network.nodes.to_feather(PATH_SAVE+'cis_nw_nodes')
+cis_network.edges.to_feather(PATH_SAVE+'cis_nw_edges')
 
 base_stats = nwu.number_noservices(cis_graph,
                          services=['power', 'healthcare', 'education', 
                                    'telecom', 'mobility'])
 
-with open(path_save_cntry +f'base_stats_{iso3}.pkl', 'wb') as f:
+with open(PATH_SAVE +f'base_stats_{iso3}.pkl', 'wb') as f:
     pickle.dump(base_stats, f) 
 
 # save country-specific dependency-table.
-df_dependencies.to_csv(path_save_cntry +f'dependency_table_{iso3}.csv')
+df_dependencies.to_csv(PATH_SAVE +f'dependency_table_{iso3}.csv')

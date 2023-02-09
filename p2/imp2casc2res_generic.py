@@ -325,31 +325,6 @@ def impacts_to_graph(imp_list, exposures, ci_network):
     return Graph(ci_net, directed=True)
 
 
-def number_noservice(service, df_res):
-    no_service = (1-df_res[df_res.ci_type=='people'][nwu.service_dict()[service]])
-    pop = df_res[df_res.ci_type=='people'].counts
-
-    return (no_service*pop).sum()
-
-def number_noservices(df_res, services=['power', 'healthcare', 'education', 
-                                        'telecom', 'mobility', 'water']):
-    servstats_dict = {}
-    for service in services:
-        servstats_dict[service] = number_noservice(service, df_res)
-    return servstats_dict
-
-def disaster_impact_allservices(pre_graph, df_res, services= ['power', 
-                                'healthcare', 'education', 'telecom',
-                                'mobility', 'water']):
-
-    dict_pre = nwu.number_noservices(pre_graph,services)
-    dict_post = number_noservices(df_res,services)
-    dict_delta = {}
-    for key, value in dict_post.items():
-        dict_delta[key] = value-dict_pre[key]
-    
-    return dict_delta
-
 def calc_cascade(hazard, exp_list, df_dependencies, graph_base, path_save,
                  imp_class):    
     

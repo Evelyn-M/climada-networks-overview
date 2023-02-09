@@ -583,7 +583,7 @@ with open(path_root+f'service_stats_{event_name}.pkl', 'wb') as f:
     
 
 # load saved stats
-with open(path_root+f'event_sidr_subhazards/service_stats_tcfl_2007.pkl', 'rb') as f:
+with open(path_root+'event_sidr_subhazards/service_stats_tcfl_2007.pkl', 'rb') as f:
      service_dict = pickle.load(f)  
 service_dict[event_name]
     
